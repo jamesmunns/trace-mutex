@@ -8,3 +8,7 @@ edition = "2018"
 
 [dependencies]
 log = "0.4.8"
+
+[features]
+1_46_0 = []
+default = []

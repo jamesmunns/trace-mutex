@@ -17,6 +17,8 @@ use std::{
 };
 
 use log::{trace, debug, warn, error};
+
+#[cfg(feature = "1_46_0")]
 use std::panic::Location;
 
 pub use std::sync::MutexGuard as StdMutexGuard;
@@ -47,7 +49,7 @@ impl<T> Mutex<T> {
         }
     }
 
-    #[track_caller]
+    #[cfg_attr(feature = "1_46_0", track_caller)]
     pub fn lock(&self) -> StdLockResult<StdMutexGuard<T>> {
         let start = Instant::now();
         loop {
@@ -65,13 +67,24 @@ impl<T> Mutex<T> {
                             Err(_) => {}
                         }
                     };
-                    let loc = Location::caller();
+
+                    #[cfg(feature = "1_46_0")]
+                    let ident = {
+                        let loc = Location::caller();
+                        print_id(&loc)
+                    };
+
+                    #[cfg(not(feature = "1_46_0"))]
+                    let ident = {
+                        print_id(self.id)
+                    };
+
                     match spin {
                         n if n < TRACE_THRESHOLD => {},
-                        n if n < DEBUG_THRESHOLD => trace!("Lock at {}:{} - Waiting {:?}", loc.file(), loc.line(), start.elapsed()),
-                        n if n < WARN_THRESHOLD => debug!("Lock at {}:{} - Waiting {:?}", loc.file(), loc.line(), start.elapsed()),
-                        n if n < ERROR_THRESHOLD => warn!("Lock at {}:{} - Waiting {:?}", loc.file(), loc.line(), start.elapsed()),
-                        _ => error!("Lock at {}:{} - Waiting {:?}", loc.file(), loc.line(), start.elapsed()),
+                        n if n < DEBUG_THRESHOLD => trace!("{} - Waiting {:?}", ident, start.elapsed()),
+                        n if n < WARN_THRESHOLD => debug!("{} - Waiting {:?}", ident, start.elapsed()),
+                        n if n < ERROR_THRESHOLD => warn!("{} - Waiting {:?}", ident, start.elapsed()),
+                        _ => error!("{} - Waiting {:?}", ident, start.elapsed()),
                     }
                     sleep(Duration::from_micros(spin as u64));
                 }
@@ -83,4 +96,14 @@ impl<T> Mutex<T> {
     pub fn try_lock(&self) -> StdTryLockResult<StdMutexGuard<T>> {
         self.inner.try_lock()
     }
+}
+
+#[cfg(not(feature = "1_46_0"))]
+fn print_id(id: usize) -> String {
+    format!("Mutex id: {}", id)
+}
+
+#[cfg(feature = "1_46_0")]
+fn print_id(loc: &Location) -> String {
+    format!("Lock at {}:{}", loc.file(), loc.line())
 }
