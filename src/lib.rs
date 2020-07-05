@@ -1,32 +1,23 @@
 use std::{
+    ops::{Deref, DerefMut},
     sync::{
-        Mutex as StdMutex,
-        LockResult as StdLockResult,
+        atomic::{AtomicUsize, Ordering},
+        Mutex as StdMutex, MutexGuard as StdMutexGuard, PoisonError as StdPoisonError,
         TryLockError as StdTryLockError,
-        TryLockResult as StdTryLockResult,
-        atomic::{
-            AtomicUsize,
-            Ordering,
-        },
     },
     thread::sleep,
-    time::{
-        Instant,
-        Duration,
-    },
+    time::{Duration, Instant},
 };
 
-use log::{trace, debug, warn, error};
+use log::{debug, error, info, trace, warn};
 
 #[cfg(feature = "1_46_0")]
 use std::panic::Location;
 
-pub use std::sync::MutexGuard as StdMutexGuard;
-
 const DEFAULT_SPIN: usize = 100;
 const SPIN_INCREASE: usize = 2;
-const TRACE_THRESHOLD: usize = 50_000;
-const DEBUG_THRESHOLD: usize = 500_000;
+const DEBUG_THRESHOLD: usize = 50_000;
+const INFO_THRESHOLD: usize = 500_000;
 const WARN_THRESHOLD: usize = 3_000_000;
 const ERROR_THRESHOLD: usize = 60_000_000;
 
@@ -37,6 +28,30 @@ pub struct Mutex<T> {
     inner: StdMutex<T>,
     spin_us: AtomicUsize,
     id: usize,
+}
+
+pub struct MutexGuard<'a, T> {
+    inner: StdMutexGuard<'a, T>,
+    id: String,
+}
+
+impl<'a, T> Deref for MutexGuard<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        self.inner.deref()
+    }
+}
+
+impl<'a, T> DerefMut for MutexGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.inner.deref_mut()
+    }
+}
+
+impl<'a, T> Drop for MutexGuard<'a, T> {
+    fn drop(&mut self) {
+        trace!("{} - Released", self.id);
+    }
 }
 
 impl<T> Mutex<T> {
@@ -50,51 +65,60 @@ impl<T> Mutex<T> {
     }
 
     #[cfg_attr(feature = "1_46_0", track_caller)]
-    pub fn lock(&self) -> StdLockResult<StdMutexGuard<T>> {
+    pub fn lock(&self) -> std::result::Result<MutexGuard<T>, StdPoisonError<StdMutexGuard<T>>> {
         let start = Instant::now();
+        #[cfg(feature = "1_46_0")]
+        let ident = {
+            let loc = Location::caller();
+            print_id(&loc, self.id)
+        };
+
+        #[cfg(not(feature = "1_46_0"))]
+        let ident = { print_id(self.id) };
+
         loop {
             match self.inner.try_lock() {
                 Ok(guard) => {
                     self.spin_us.store(DEFAULT_SPIN, Ordering::Release);
-                    return Ok(guard);
+                    trace!("{} - Locked", ident);
+                    return Ok(MutexGuard {
+                        inner: guard,
+                        id: ident,
+                    });
                 }
                 Err(StdTryLockError::WouldBlock) => {
                     let spin = loop {
                         let load = self.spin_us.load(Ordering::Acquire);
                         let store = load.saturating_mul(SPIN_INCREASE);
-                        match self.spin_us.compare_exchange(load, store, Ordering::SeqCst, Ordering::SeqCst) {
+                        match self.spin_us.compare_exchange(
+                            load,
+                            store,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ) {
                             Ok(spin) => break spin,
                             Err(_) => {}
                         }
                     };
 
-                    #[cfg(feature = "1_46_0")]
-                    let ident = {
-                        let loc = Location::caller();
-                        print_id(&loc)
-                    };
-
-                    #[cfg(not(feature = "1_46_0"))]
-                    let ident = {
-                        print_id(self.id)
-                    };
-
                     match spin {
-                        n if n < TRACE_THRESHOLD => {},
-                        n if n < DEBUG_THRESHOLD => trace!("{} - Waiting {:?}", ident, start.elapsed()),
-                        n if n < WARN_THRESHOLD => debug!("{} - Waiting {:?}", ident, start.elapsed()),
-                        n if n < ERROR_THRESHOLD => warn!("{} - Waiting {:?}", ident, start.elapsed()),
+                        n if n < DEBUG_THRESHOLD => {}
+                        n if n < INFO_THRESHOLD => {
+                            debug!("{} - Waiting {:?}", ident, start.elapsed())
+                        }
+                        n if n < WARN_THRESHOLD => {
+                            info!("{} - Waiting {:?}", ident, start.elapsed())
+                        }
+                        n if n < ERROR_THRESHOLD => {
+                            warn!("{} - Waiting {:?}", ident, start.elapsed())
+                        }
                         _ => error!("{} - Waiting {:?}", ident, start.elapsed()),
                     }
                     sleep(Duration::from_micros(spin as u64));
                 }
-                _ => panic!("Mutex id {} poisoned!", self.id),
+                Err(StdTryLockError::Poisoned(p)) => return Err(p),
             }
         }
-    }
-
-    pub fn try_lock(&self) -> StdTryLockResult<StdMutexGuard<T>> {
-        self.inner.try_lock()
     }
 }
 
@@ -104,6 +128,6 @@ fn print_id(id: usize) -> String {
 }
 
 #[cfg(feature = "1_46_0")]
-fn print_id(loc: &Location) -> String {
-    format!("Lock at {}:{}", loc.file(), loc.line())
+fn print_id(loc: &Location, id: usize) -> String {
+    format!("Lock {} at {}:{}", id, loc.file(), loc.line())
 }
